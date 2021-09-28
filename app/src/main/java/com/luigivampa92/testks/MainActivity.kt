@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
             sb.appendLine("isInsideStrongBox(): ${isStrongBoxAvailable() && getPrefIsGeneratedInStrongbox()}")
             sb.appendLine("\nPublic key:")
             sb.appendLine("format: ${publicKey.format}")
-            sb.appendLine("\nHEX:\n\n${cleanPublicKeyValue(publicKey).toHexString()}")
+            sb.appendLine("\nHEX:\n\n${cleanPublicKeyValue(publicKey).toHexStringAligned(8)}")
             sb.appendLine("\nCERTIFICATE:\n\n $certificate")
             textKeyInfo.text = sb.toString()
 
@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             val sb = StringBuilder()
             sb.appendLine("value (str): $valueString")
             sb.appendLine("value (hex): ${valueHex.toHexString()}")
-            sb.appendLine("signature: ${signature.cleanSignature.toHexString()}")
+            sb.appendLine("signature:\n${signature.cleanSignature.toHexStringAligned(8)}")
             sb.appendLine("verify: ${if (resultVerification) "OK" else "ERROR"}")
             textSignInfo.text = sb.toString()
 
@@ -318,6 +318,10 @@ fun ByteArray.toHexString(): String {
     }
     return builder.toString()
 }
+
+fun ByteArray.toHexStringAligned(bytesInARow: Int) = this.toHexString().trim()
+    .chunked(bytesInARow * 3)
+    .joinToString("\n", transform = { it.trim() })
 
 fun ByteArray.toHexStringLowercase(): String {
     return this.toHexString().lowercase().replace(" ", "")
