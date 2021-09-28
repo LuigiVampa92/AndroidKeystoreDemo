@@ -2,47 +2,57 @@ package com.luigivampa92.testks
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import android.util.Log
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.AppCompatEditText
+import com.google.android.material.switchmaterial.SwitchMaterial
 import java.security.*
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.InvalidKeySpecException
-import java.util.*
 import javax.security.auth.x500.X500Principal
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
+        const val LOG_TAG = "STRONGBOX"
+        const val PREF_FILE = "testks"
+        const val PREF_KEY_STORNGBOX = "use_strongbox"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "TEST_KEY"
         const val KEY_CURVE_TYPE = "secp256r1"
         const val KEY_SIGN_ALGO = "SHA256withECDSA"
+        const val KEY_HASH_ALGO = KeyProperties.DIGEST_SHA256
     }
 
     private lateinit var buttonKeyNew: Button
     private lateinit var buttonKeyClear: Button
+    private lateinit var switchStrongbox: SwitchMaterial
     private lateinit var containerKeyInfo: View
     private lateinit var textKeyInfo: TextView
     private lateinit var containerSignInfo: View
     private lateinit var textSignInfo: TextView
-    private lateinit var buttonTestNew: Button
+    private lateinit var editTextSign: AppCompatEditText
+    private lateinit var buttonSign: Button
 
+    private lateinit var sharedPreferences: SharedPreferences
     private lateinit var keyguardManager: KeyguardManager
     private lateinit var keystore: KeyStore
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        initSecurityObjects()
+        initObjects()
         initUi()
 
         buttonKeyNew.setOnClickListener {
@@ -53,8 +63,8 @@ class MainActivity : AppCompatActivity() {
             cleanKeystore()
             updateKeyInfoUi()
         }
-        buttonTestNew.setOnClickListener {
-            updateSignatureInfoUi()
+        buttonSign.setOnClickListener {
+            updateSignatureInfoUi(editTextSign.text.toString())
         }
 
         updateKeyInfoUi()
@@ -67,7 +77,11 @@ class MainActivity : AppCompatActivity() {
         textKeyInfo = findViewById(R.id.text_key_ifno)
         containerSignInfo = findViewById(R.id.container_sign_info)
         textSignInfo = findViewById(R.id.text_sign_ifno)
-        buttonTestNew = findViewById(R.id.button_test_new)
+        editTextSign = findViewById(R.id.input_sign)
+        buttonSign = findViewById(R.id.button_sign)
+        switchStrongbox = findViewById(R.id.switch_strongbox)
+        switchStrongbox.setVisible(isStrongBoxAvailable())
+        switchStrongbox.isChecked = getPrefIsGeneratedInStrongbox()
     }
 
     private fun updateKeyInfoUi() {
@@ -83,11 +97,11 @@ class MainActivity : AppCompatActivity() {
             sb.appendLine("curve type: $KEY_CURVE_TYPE")
             sb.appendLine("\nPrivate key:")
             sb.appendLine("isInsideSecureHardware(): $insideSecureHardware")
-            sb.appendLine("isInsideStrongBox(): ${isStrongBoxAvailable()}")
+            sb.appendLine("isInsideStrongBox(): ${isStrongBoxAvailable() && getPrefIsGeneratedInStrongbox()}")
             sb.appendLine("\nPublic key:")
             sb.appendLine("format: ${publicKey.format}")
-            sb.appendLine("\nHEX:\n\n${publicKey.encoded.toHexString()}")
-            sb.appendLine("\nCERTIFICATE:\n\n ${certificate.toString()}")
+            sb.appendLine("\nHEX:\n\n${cleanPublicKeyValue(publicKey).toHexString()}")
+            sb.appendLine("\nCERTIFICATE:\n\n $certificate")
             textKeyInfo.text = sb.toString()
 
             containerKeyInfo.setVisible(true)
@@ -95,33 +109,60 @@ class MainActivity : AppCompatActivity() {
             containerKeyInfo.setVisible(false)
         }
 
-        updateSignatureInfoUi()
+        updateSignatureInfoUi(editTextSign.text.toString())
     }
 
-    private fun updateSignatureInfoUi() {
+    private fun updateSignatureInfoUi(messageToSign: String) {
         if (keystore.aliases().toList().contains(KEY_ALIAS)) {
+            var timeStart = 0L
+            var timeStop = 0L
+            log("----------")
 
-            val valueString = "TEST_VALUE_TO_SIGN"
+            val valueString = messageToSign
             val valueHex = valueString.toByteArray()
 
             val signPrivateKey = keystore.getKey(KEY_ALIAS, null) as PrivateKey
             val signSignature = Signature.getInstance(KEY_SIGN_ALGO) as Signature
+            timeStart = System.currentTimeMillis()
             signSignature.initSign(signPrivateKey)
             signSignature.update(valueHex)
             val resultSignature: ByteArray = signSignature.sign()
+            timeStop = System.currentTimeMillis()
+            log("message signing took ${timeStop - timeStart} ms")
 
             val verifyPublicKey = keystore.getCertificate(KEY_ALIAS).publicKey as PublicKey
             val verifySignature = Signature.getInstance(KEY_SIGN_ALGO) as Signature
+            timeStart = System.currentTimeMillis()
             verifySignature.initVerify(verifyPublicKey)
             verifySignature.update(valueHex)
             val resultVerification: Boolean = verifySignature.verify(resultSignature)
+            timeStop = System.currentTimeMillis()
+            log("message verification took ${timeStop - timeStart} ms")
+
+            val signature = cleanSignature(resultSignature)
+            val publicKey = cleanPublicKeyValue(verifyPublicKey)
 
             val sb = StringBuilder()
             sb.appendLine("value (str): $valueString")
             sb.appendLine("value (hex): ${valueHex.toHexString()}")
-            sb.appendLine("signature: ${resultSignature.toHexString()}")
+            sb.appendLine("signature: ${signature.cleanSignature.toHexString()}")
             sb.appendLine("verify: ${if (resultVerification) "OK" else "ERROR"}")
             textSignInfo.text = sb.toString()
+
+
+            log("----------")
+            log("key alias: $KEY_ALIAS")
+            log("curve type: $KEY_CURVE_TYPE")
+            log("sign algo: $KEY_SIGN_ALGO")
+            log("input value (str): $valueString")
+            log("input value (hex): ${valueHex.toHexStringLowercase()}")
+//            log("full asn1 signature: (${resultSignature.size} bytes) : ${resultSignature.toHexStringLowercase()}")
+            log("signature r: (${signature.r.size} bytes) : ${signature.r.toHexStringLowercase()}")
+            log("signature s: (${signature.s.size} bytes) : ${signature.s.toHexStringLowercase()}")
+            log("signature full: (${signature.cleanSignature.size} bytes) : ${signature.cleanSignature.toHexStringLowercase()}")
+//            log("full asn1 public key: (${verifyPublicKey.encoded.size} bytes) :${verifyPublicKey.encoded.toHexStringLowercase()}")
+            log("public key: (${publicKey.size} bytes) :${publicKey.toHexStringLowercase()}")
+            log("verify result: ${if (resultVerification) "OK" else "ERROR"}")
 
             containerSignInfo.setVisible(true)
         } else {
@@ -139,25 +180,33 @@ class MainActivity : AppCompatActivity() {
         try {
             cleanKeystore()
 
+            val timeStart = System.currentTimeMillis()
+
             val keyGenParameterSpecBuilder: KeyGenParameterSpec.Builder =
                 KeyGenParameterSpec.Builder(
                     KEY_ALIAS,
                     KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
                 )
-            keyGenParameterSpecBuilder.setDigests(KeyProperties.DIGEST_SHA256)
+            keyGenParameterSpecBuilder.setDigests(KEY_HASH_ALGO)
             keyGenParameterSpecBuilder.setAlgorithmParameterSpec(ECGenParameterSpec(KEY_CURVE_TYPE))
             val x500data = X500Principal("CN=CheckAndroidKeystoreTest")
             keyGenParameterSpecBuilder.setCertificateSubject(x500data)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                if (isStrongBoxAvailable()) {
-                    keyGenParameterSpecBuilder.setIsStrongBoxBacked(true)
-                }
-                keyGenParameterSpecBuilder.setUnlockedDeviceRequired(true)
+            if (isStrongBoxAvailable() && switchStrongbox.isChecked) {
+                keyGenParameterSpecBuilder.setIsStrongBoxBacked(true)
+                setPrefIsGeneratedInStrongbox(true)
+            } else {
+                setPrefIsGeneratedInStrongbox(false)
             }
             val keyGenParameterSpec = keyGenParameterSpecBuilder.build()
             val keyPairGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
             keyPairGenerator.initialize(keyGenParameterSpec)
             keyPairGenerator.generateKeyPair()
+
+            val timeStop = System.currentTimeMillis()
+            log("----------")
+            log("keypair generation took ${timeStop - timeStart} ms")
+            log("----------")
+
         } catch (e: Exception) {
             navigateToError()
         }
@@ -167,15 +216,8 @@ class MainActivity : AppCompatActivity() {
         android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.P
                 && packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
 
-    private fun getKeyPeriod(): Pair<Date,Date> {
-        val cal = Calendar.getInstance()
-        cal.add(Calendar.YEAR, 10)
-        val dateIssue = Date()
-        val dateExpire = cal.time
-        return dateIssue to dateExpire
-    }
-
-    private fun initSecurityObjects() {
+    private fun initObjects() {
+        sharedPreferences = getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         try {
             keyguardManager = getSystemService(KeyguardManager::class.java) as KeyguardManager
             keystore = KeyStore.getInstance(ANDROID_KEYSTORE)
@@ -208,18 +250,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showViews(vararg views: View) {
-        views.forEach {
-            it.setVisible(true)
+    private fun log(value: String?) {
+        value?.let {
+            Log.d(LOG_TAG, value)
         }
     }
 
-    private fun hideViews(vararg views: View) {
-        views.forEach {
-            it.setVisible(false)
-        }
+    private fun concatByteArrays(first: ByteArray, second: ByteArray): ByteArray {
+        val fs = first.size
+        val ss = second.size
+        val result = ByteArray(fs + ss)
+        System.arraycopy(first, 0, result, 0, fs)
+        System.arraycopy(second, 0, result, fs, ss)
+        return result
+    }
+
+    private fun getPrefIsGeneratedInStrongbox(): Boolean {
+        return sharedPreferences.getBoolean(PREF_KEY_STORNGBOX, false)
+    }
+
+    private fun setPrefIsGeneratedInStrongbox(generatedInStrongbox: Boolean) {
+        sharedPreferences.edit().putBoolean(PREF_KEY_STORNGBOX, generatedInStrongbox).commit()
+    }
+
+    private fun cleanPublicKeyValue(publicKeyObj: PublicKey): ByteArray {
+        return publicKeyObj.encoded.copyOfRange(27, publicKeyObj.encoded.size)
+    }
+
+    private fun cleanSignature(signature: ByteArray): SignatureResult {
+        val cleanSignatureNumbers = ByteArray(signature.size - 2)
+        System.arraycopy(signature, 2, cleanSignatureNumbers, 0, signature.size - 2)
+        val rBinSize = cleanSignatureNumbers[1].toPositiveInt()
+        val sBinSize = cleanSignatureNumbers[2 + rBinSize + 1].toPositiveInt()
+        val rBin = ByteArray(rBinSize)
+        val sBin = ByteArray(sBinSize)
+        System.arraycopy(cleanSignatureNumbers, 2, rBin, 0, rBinSize)
+        System.arraycopy(cleanSignatureNumbers, 2 + rBinSize + 2, sBin, 0, sBinSize)
+        val rBinClean = ByteArray(32)
+        System.arraycopy(rBin, if (rBinSize == 33 && rBin[0] == 0x00.toByte()) 1 else 0, rBinClean, 0, 32)
+        val sBinClean = ByteArray(32)
+        System.arraycopy(sBin, if (sBinSize == 33 && sBin[0] == 0x00.toByte()) 1 else 0, sBinClean, 0, 32)
+        val cleanSignature = concatByteArrays(rBinClean, sBinClean)
+        return SignatureResult(rBinClean, sBinClean, cleanSignature)
     }
 }
+
+private data class SignatureResult(
+    val r: ByteArray,
+    val s: ByteArray,
+    val cleanSignature: ByteArray
+)
 
 fun Context.toast(message: String?) {
     message?.let {
@@ -238,3 +318,9 @@ fun ByteArray.toHexString(): String {
     }
     return builder.toString()
 }
+
+fun ByteArray.toHexStringLowercase(): String {
+    return this.toHexString().lowercase().replace(" ", "")
+}
+
+fun Byte.toPositiveInt() = toInt() and 0xFF
